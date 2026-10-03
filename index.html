@@ -117,12 +117,42 @@ const cachedEmployees=Array.isArray(saved?.employees)?saved.employees:[];
 const cachedAssigned=cachedEmployees.filter(e=>e&&e.team&&e.team!=='Unassigned').length;
 if(cachedEmployees.length>=221 && cachedAssigned>=221) employees=cachedEmployees;
 let transferHistory=saved?.transferHistory||[];let attendanceHistory=saved?.attendanceHistory||[];let attendance={};let submittedTeams={};if(saved?.attendanceDate===today){attendance=saved?.attendance||{};submittedTeams=saved?.submittedTeams||{};}else if(saved?.attendanceDate){const oldDate=saved.attendanceDate;const oldAttendance=saved.attendance||{};const oldSubmitted=saved.submittedTeams||{};const snapshot={date:oldDate,attendance:oldAttendance,submittedTeams:oldSubmitted};attendanceHistory=[snapshot,...attendanceHistory.filter(x=>x.date!==oldDate)].slice(0,30);localStorage.setItem('attendanceDemoState',JSON.stringify({attendance:{},submittedTeams:{},employees,transferHistory,attendanceHistory,attendanceDate:today}));}employees.forEach(e=>{if(!attendance[e.id])attendance[e.id]='Present'});if(!saved?.attendanceDate){localStorage.setItem('attendanceDemoState',JSON.stringify({attendance,submittedTeams,employees,transferHistory,attendanceHistory,attendanceDate:today}));}let role='';let currentTeam='';let detailTeam=teams[0].name;
+
+// Shared Supabase sync: attendance is stored centrally through a Netlify Function.
+const REMOTE_ATTENDANCE_ENDPOINT='/api/attendance';
+const statusToDb=v=>v==='Present'?'PRESENT':v==='Planned Leave'?'PLANNED_LEAVE':'UNPLANNED_LEAVE';
+const statusFromDb=v=>v==='PRESENT'?'Present':v==='PLANNED_LEAVE'?'Planned Leave':'Unplanned Leave';
+async function loadRemoteAttendance(){
+  try{
+    const r=await fetch(`${REMOTE_ATTENDANCE_ENDPOINT}?date=${encodeURIComponent(today)}`,{cache:'no-store'});
+    if(!r.ok) throw new Error('Remote attendance unavailable');
+    const data=await r.json();
+    (data.attendance||[]).forEach(x=>{attendance[x.employee_id]=statusFromDb(x.status)});
+    submittedTeams={};
+    (data.submissions||[]).forEach(x=>{
+      const t=teams.find(t=>String(t.id)===String(x.team_id));
+      if(t) submittedTeams[t.name]=true;
+    });
+    employees.forEach(e=>{if(!attendance[e.id])attendance[e.id]='Present'});
+    saveDemo();
+  }catch(e){console.warn('Shared attendance sync unavailable:',e);}
+}
+async function syncTeamAttendance(teamName){
+  const t=teams.find(x=>x.name===teamName);
+  if(!t) throw new Error('Team not found');
+  const rows=teamEmployees(teamName).map(e=>({employee_id:e.id,status:statusToDb(attendance[e.id]||'Present')}));
+  const r=await fetch(REMOTE_ATTENDANCE_ENDPOINT,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({attendance_date:today,team_name:teamName,submitted_by:(document.getElementById('loginId')?.value||'').trim(),records:rows})});
+  if(!r.ok){let msg='Shared attendance save failed';try{const j=await r.json();msg=j.error||msg}catch{}throw new Error(msg)}
+  submittedTeams[teamName]=true;
+  saveDemo();
+}
+
 function toggleSpecialRole(){
   const id=(document.getElementById('loginId')?.value||'').trim();
   const wrap=document.getElementById('specialRoleWrap');
   if(wrap) wrap.style.display=id==='6300323'?'block':'none';
 }
-function login(){
+async function login(){
   const id=document.getElementById('loginId').value.trim();
   const msg=document.getElementById('loginMsg');
   const specialWrap=document.getElementById('specialRoleWrap');
@@ -149,6 +179,7 @@ function login(){
       role==='TL' ? `${user.name} • TL` : `${user.name} • Admin`;
     document.getElementById('avatar').textContent=role==='TL'?'TL':'A';
     buildNav();
+    await loadRemoteAttendance();
     renderAll();
     return;
   }
@@ -184,6 +215,7 @@ function login(){
     role==='TL' ? 'TL' : role==='MANAGER' ? 'M' : 'A';
 
   buildNav();
+  await loadRemoteAttendance();
   renderAll();
 }
 function logout(){location.reload()}
@@ -240,7 +272,7 @@ function adminResetTodayAttendance(){
   renderAll();
   alert(`Today's attendance has been reset for ${today}. TLs can mark and submit fresh attendance.`);
 }
-function submitAttendance(){if(submittedTeams[currentTeam]){if(!confirm(currentTeam+' is already submitted for today. Submit again?'))return}submittedTeams[currentTeam]=true;saveDemo();document.getElementById('confirmTeam').textContent=currentTeam;document.getElementById('confirmDate').textContent=today;showPage('confirmation')}
+async function submitAttendance(){if(submittedTeams[currentTeam]){if(!confirm(currentTeam+' is already submitted for today. Submit again?'))return}try{await syncTeamAttendance(currentTeam);document.getElementById('confirmTeam').textContent=currentTeam;document.getElementById('confirmDate').textContent=today;showPage('confirmation')}catch(e){alert(e.message||'Could not save attendance. Please try again.')}}
 function renderLeaves(){let q=(document.getElementById('leaveSearch')?.value||'').toLowerCase(),team=document.getElementById('leaveTeam')?.value||'',type=document.getElementById('leaveType')?.value||'';let source=role==='TL'?teamEmployees(currentTeam):employees;let rows=source.filter(e=>submittedTeams[e.team]&&attendance[e.id]!=='Present'&&(e.name+' '+e.id).toLowerCase().includes(q)&&(!team||e.team===team)&&(!type||attendance[e.id]===type));let sel=document.getElementById('leaveTeam');if(sel&&sel.options.length===1)teams.forEach(t=>sel.add(new Option(t.name,t.name)));document.getElementById('leaveTable').innerHTML=rows.length?rows.map(e=>`<tr><td><b>${e.name}</b></td><td>${e.id}</td><td>${e.team}</td><td><span class="badge ${attendance[e.id]==='Planned Leave'?'b-planned':'b-unplanned'}">${attendance[e.id]}</span></td><td>${e.team}</td></tr>`).join(''):`<tr><td colspan="5" class="empty">No leave records found.</td></tr>`}
 function renderEmployees(){let q=(document.getElementById('empSearch')?.value||'').toLowerCase();let rows=employees.filter(e=>(e.name+' '+e.id+' '+e.team).toLowerCase().includes(q)).slice(0,100);document.getElementById('empTable').innerHTML=rows.map(e=>`<tr><td>${e.id}</td><td>${e.name}</td><td>${e.team}</td><td>${e.type}</td><td>${submittedTeams[e.team]?`<span class="badge ${attendance[e.id]==='Present'?'b-present':attendance[e.id]==='Planned Leave'?'b-planned':'b-unplanned'}">${attendance[e.id]}</span>`:'<span class="badge b-pending">Pending</span>'}</td></tr>`).join('')}
 function openTeam(t){detailTeam=t;let s=stats(t),es=teamEmployees(t);syncTeamCounts();let tt=teams.find(x=>x.name===t);document.getElementById('detailSub').textContent=`${t} • ${tt?.tlCount||0} TL + ${tt?.ftcCount||0} FTC = ${tt?.members||0} Manpower${s.submitted?' • Submitted '+today:' • Not Submitted'}`;document.getElementById('dPresent').textContent=s.present;document.getElementById('dPlanned').textContent=s.planned;document.getElementById('dUnplanned').textContent=s.unplanned;document.getElementById('dLeave').textContent=s.leave;document.getElementById('dPct').textContent=s.submitted?s.pct+'%':'—';document.getElementById('detailTable').innerHTML=es.map(e=>`<tr><td>${e.name}</td><td>${e.id}</td><td>${e.type}</td><td>${s.submitted?attendance[e.id]:'Pending'}</td></tr>`).join('');showPage('teamDetail')}
