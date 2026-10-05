@@ -1578,6 +1578,11 @@ window.supabaseConnected = supabaseConnected;
       if(!own.length){box.innerHTML='<div class="empty">No 2nd Shift schedule assigned for your team.</div>';removeTomorrow();return;}
       let empMap={};
       try{
+        const dates=[...new Set(own.map(x=>String(x.start_date)).filter(Boolean))];
+        const results=await Promise.all(dates.map(d=>window.api('getTeamEmployees',{
+          employee_id:window.currentEmployeeId,team_id:Number(teamId),date:d,shift:G
+        })));
+        results.forEach(er=>(er?.employees||[]).forEach(e=>empMap[String(e.employee_id)]=e));
         const [erG,erS]=await Promise.all([
           window.api('getTeamEmployees',{employee_id:window.currentEmployeeId,team_id:Number(teamId),date:today,shift:G}),
           window.api('getTeamEmployees',{employee_id:window.currentEmployeeId,team_id:Number(teamId),date:today,shift:S})
@@ -1591,18 +1596,68 @@ window.supabaseConnected = supabaseConnected;
       }).join('');
       removeTomorrow(); return;
     }
-    page.innerHTML=`<div class="page-head"><div><h2>Shift Planning</h2><p class="muted">Assign General Shift or 2nd Shift from a From date to a To date.</p></div><span class="badge b-present">Auto active by date</span></div>
+    page.innerHTML=`<div class="page-head"><div><h2>Shift Planning</h2><p class="muted">Assign General Shift or 2nd Shift from a From date to a To date. Admin can also view all teams and remove existing 2nd Shift assignments.</p></div><span class="badge b-present">Auto active by date</span></div>
       <div class="panel" style="margin-top:14px"><div class="v11-date-grid"><div><label class="small muted">From Date</label><input id="v15From" type="date" class="input" style="width:100%;margin-top:5px"></div><div><label class="small muted">To Date</label><input id="v15To" type="date" class="input" style="width:100%;margin-top:5px"></div></div>
       <div class="toolbar" style="margin-top:12px"><label class="small muted">Team</label><select id="v15Team" class="input"></select><button id="v15Refresh" class="btn light">↻ Refresh</button><button id="v15Save" class="btn primary">💾 Save Shift Range</button></div></div>
       <div id="v15Content" class="panel" style="margin-top:14px">Loading…</div>`;
     const f=document.getElementById('v15From'),t=document.getElementById('v15To'),sel=document.getElementById('v15Team');
     const d=new Date();d.setDate(d.getDate()+1);f.value=iso(d);t.value=iso(d);
     let teams=(await window.api('getTeams',{employee_id:window.currentEmployeeId})).teams||[];
-    sel.innerHTML=teams.map(x=>`<option value="${esc(x.id)}">${esc(x.team_name||x.name)}</option>`).join('');
+    const isAdmin=role==='ADMIN';
+    sel.innerHTML=(isAdmin?'<option value="ALL">🌐 All Teams</option>':'')+teams.map(x=>`<option value="${esc(x.id)}">${esc(x.team_name||x.name)}</option>`).join('');
     if(!teams.length){document.getElementById('v15Content').innerHTML='<div class="empty">No active teams found.</div>';return;}
-    if(window.__v15TeamId && teams.some(x=>String(x.id)===String(window.__v15TeamId)))sel.value=String(window.__v15TeamId);
+    if(window.__v15TeamId && (String(window.__v15TeamId)==='ALL' || teams.some(x=>String(x.id)===String(window.__v15TeamId))))sel.value=String(window.__v15TeamId);
+
+    async function loadEmployeeMap(teamIds, date){
+      const map={};
+      await Promise.all(teamIds.map(async tid=>{
+        try{
+          const [a,b]=await Promise.all([
+            window.api('getTeamEmployees',{employee_id:window.currentEmployeeId,team_id:Number(tid),date:date,shift:G}),
+            window.api('getTeamEmployees',{employee_id:window.currentEmployeeId,team_id:Number(tid),date:date,shift:S})
+          ]);
+          [...(a?.employees||[]),...(b?.employees||[])].forEach(e=>map[String(e.employee_id)]=e);
+        }catch(e){}
+      }));
+      return map;
+    }
+
+    async function renderAll(){
+      const from=f.value,to=t.value;
+      if(!from||!to||to<from){document.getElementById('v15Content').innerHTML='<div class="notice error">Please select a valid From and To date.</div>';return;}
+      window.__v15TeamId='ALL';
+      const ranges=await getRanges(from);
+      const active=ranges.filter(x=>String(x.shift)===S && String(x.start_date)<=to && String(x.end_date)>=from);
+      const teamIds=[...new Set(active.map(x=>Number(x.team_id)).filter(Boolean))];
+      const empMap=await loadEmployeeMap(teamIds,from);
+      const grouped={};
+      active.forEach(x=>{const tid=Number(x.team_id);(grouped[tid] ||= []).push(x);});
+      const cards=Object.keys(grouped).sort((a,b)=>Number(a)-Number(b)).map(tid=>{
+        const team=teams.find(x=>Number(x.id)===Number(tid));
+        const rows=grouped[tid].sort((a,b)=>String(a.start_date).localeCompare(String(b.start_date))||String(a.employee_id).localeCompare(String(b.employee_id))).map(x=>{
+          const e=empMap[String(x.employee_id)];
+          const name=e?.name?esc(e.name):esc(x.employee_id);
+          const roleName=e?.role||e?.type||'Employee';
+          return `<tr><td><b>${name}</b><div class="muted small">${esc(x.employee_id)}</div></td><td>${esc(roleName)}</td><td>${disp(x.start_date)} → ${disp(x.end_date)}</td><td><button class="btn light v15RemoveOne" data-team="${esc(x.team_id)}" data-id="${esc(x.employee_id)}" data-from="${esc(x.start_date)}" data-to="${esc(x.end_date)}">Remove</button></td></tr>`;
+        }).join('');
+        return `<div class="shift-att-card" style="margin-top:12px;border:2px solid #f59e0b"><div class="shift-att-head"><b>🌙 ${esc(team?.team_name||('Team '+tid))}</b><span class="badge b-planned">${grouped[tid].length} Employees</span></div><div class="table-wrap"><table class="table"><thead><tr><th>Name / ID</th><th>Type</th><th>Assigned Range</th><th>Action</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+      }).join('');
+      document.getElementById('v15Content').innerHTML=`<div class="page-head"><div><h3 style="margin:0">🌐 All Teams • ${disp(from)} → ${disp(to)}</h3><div class="muted small">All active 2nd Shift assignments overlapping the selected dates. TL/FTC/employee role is shown when available.</div></div><span class="badge">${active.length} Assignments</span></div>${cards||'<div class="empty" style="margin-top:12px">No 2nd Shift employees found for the selected dates.</div>'}<div class="notice" style="margin-top:14px">💡 <b>Remove 2nd Shift:</b> use <b>Remove</b> beside an employee. It removes that saved 2nd Shift assignment for its full stored date range and returns the employee to General Shift for that range.</div>`;
+      document.querySelectorAll('.v15RemoveOne').forEach(btn=>btn.onclick=async()=>{
+        if(!confirm(`Remove 2nd Shift for ${btn.dataset.id} from ${disp(btn.dataset.from)} to ${disp(btn.dataset.to)}?`))return;
+        btn.disabled=true;btn.textContent='Removing…';
+        try{
+          const r=await window.api('saveShiftPlanRange',{employee_id:window.currentEmployeeId,team_id:Number(btn.dataset.team),start_date:btn.dataset.from,end_date:btn.dataset.to,plans:[{employee_id:String(btn.dataset.id),shift:G}]});
+          if(!r?.success)throw new Error(r?.error||'Remove failed');
+          await renderAll();
+        }catch(e){btn.disabled=false;btn.textContent='Remove';alert('Remove failed: '+(e?.message||e));}
+      });
+    }
+
     async function render(){
-      const from=f.value,to=t.value,tid=Number(sel.value); if(!from||!to||!tid)return;
+      const from=f.value,to=t.value,raw=sel.value;
+      if(raw==='ALL'){await renderAll();return;}
+      const tid=Number(raw); if(!from||!to||!tid)return;
       if(to<from){document.getElementById('v15Content').innerHTML='<div class="notice error">To Date cannot be before From Date.</div>';return;}
       window.__v15TeamId=tid;
       const er=await window.api('getTeamEmployees',{employee_id:window.currentEmployeeId,team_id:tid,date:from,shift:G});
@@ -1617,8 +1672,9 @@ window.supabaseConnected = supabaseConnected;
       try{await render();}finally{if(b){b.disabled=false;b.textContent='↻ Refresh';}}
     };
     const saveBtn=document.getElementById('v15Save');
-    document.getElementById('v15Save').onclick=async()=>{
+    saveBtn.onclick=async()=>{
       const from=f.value,to=t.value,tid=Number(sel.value);
+      if(sel.value==='ALL')return alert('For All Teams, use the Remove buttons to remove existing 2nd Shift assignments. To assign shifts, select a specific team.');
       if(!from||!to||!tid||to<from)return alert('Please select valid From and To dates.');
       const plans=[...document.querySelectorAll('.v15shift')].map(x=>({employee_id:x.dataset.id,shift:x.value}));
       if(!plans.length)return alert('No employees found for this team.');
