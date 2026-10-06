@@ -11,7 +11,7 @@
 .login{position:relative;min-height:100vh;overflow:hidden;display:grid;place-items:center;padding:20px;background:#06366d}
 .login::before{content:"";position:absolute;inset:0;background:rgba(0,30,70,.18);z-index:0;pointer-events:none}
 .login-bg{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center;z-index:0}
-.loginbox{position:relative;z-index:2;background:rgba(255,255,255,.28)!important;border:1px solid rgba(255,255,255,.62)!important;box-shadow:0 20px 70px rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.55)!important;backdrop-filter:blur(22px) saturate(135%)!important;-webkit-backdrop-filter:blur(22px) saturate(135%)!important}.loginbox .notice{background:rgba(255,255,255,.30)!important;border:1px solid rgba(255,255,255,.42)!important;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}
+.loginbox{position:relative;z-index:2;border:1px solid rgba(255,255,255,.6);box-shadow:0 20px 70px rgba(0,0,0,.4)}
 .page-back{margin:8px 0 2px}.page-back .btn{font-size:13px}</style></head>
 <body>
 <div id="login" class="login">
@@ -308,171 +308,27 @@ function exportCSV(){let rows=[['Employee ID','Name','Team','Type','Attendance',
 
 
 </script><script>
-/* Workforce Attendance — FINAL shift/realtime patch */
-window.SUPABASE_ANON_KEY = SUPABASE_ANON_KEY;
-window.SUPABASE_EDGE_URL = SUPABASE_EDGE_URL;
-window.api = api;
-window.normalizeAttendanceStatus = normalizeAttendanceStatus;
-window.apiAttendanceStatus = apiAttendanceStatus;
-window.supabaseConnected = supabaseConnected;
-(function(){
-  const G='General Shift', S='2nd Shift', BOTH='BOTH';
-  const norm=x=>String(x||G)===S?S:G;
-  const label=x=>norm(x);
-  window.activeShift=G;
-  window.attendanceByShift={[G]:{},[S]:{}};
-  window.submittedByShift={[G]:{},[S]:{}};
-
-  function ensureShiftState(sh){
-    sh=norm(sh);
-    if(!window.attendanceByShift[sh]) window.attendanceByShift[sh]={};
-    if(!window.submittedByShift[sh]) window.submittedByShift[sh]={};
-    return sh;
-  }
-  window.activateShift=function(sh){
-    sh=ensureShiftState(sh); window.activeShift=sh;
-    window.attendance=window.attendanceByShift[sh];
-    window.submittedTeams=window.submittedByShift[sh];
-    (window.employees||[]).forEach(e=>{ if(window.attendance[e.id]==null) window.attendance[e.id]='Present'; });
-  };
-
-  window.loadSupabaseSharedData=async function(){
-    const tr=await window.api('getTeams',{employee_id:window.currentEmployeeId||'6300323'});
-    const allTeams=tr.teams||[];
-    const ts=(window.role==='TL' && window.currentTeam) ? allTeams.filter(t=>t.team_name===window.currentTeam) : allTeams;
-    const em=[], ab={[G]:{},[S]:{}}, sb={[G]:{},[S]:{}};
-    for(const t of ts){
-      // Employee list is shift-independent; API access is explicitly supplied.
-      const base=await window.api('getTeamEmployees',{employee_id:window.currentEmployeeId||'6300323',team_id:t.id,date:window.today,shift:G});
-      for(const m of (base.employees||[])){
-        if(!m.employee_id) continue;
-        if(!em.some(x=>x.id===m.employee_id)) em.push({id:m.employee_id,name:m.name||m.employee_id,team:t.team_name,type:String(m.role||'').toUpperCase()==='TL'?'TL':'FTC',active:m.active!==false});
-      }
-      for(const sh of [G,S]){
-        const r=sh===G?base:await window.api('getTeamEmployees',{employee_id:window.currentEmployeeId||'6300323',team_id:t.id,date:window.today,shift:sh});
-        for(const a of (r.attendance||[])) ab[sh][a.employee_id]=window.normalizeAttendanceStatus(a.status);
-        const hasSubmission=(r.attendance||[]).length>0;
-        if(hasSubmission) sb[sh][t.team_name]=true;
-      }
-    }
-    window.employees=em;
-    window.attendanceByShift=ab;
-    window.submittedByShift=sb;
-    window.teams=ts.map(t=>({id:t.id,name:t.team_name,members:0,tlCount:0,ftcCount:0,active:t.active!==false}));
-    window.syncTeamCounts();
-    window.activateShift(window.activeShift);
-    window.supabaseConnected=true;
-  };
-
-  window.statsForShift=function(team,sh){
-    sh=norm(sh); const es=window.teamEmployees(team), m=window.attendanceByShift[sh]||{};
-    const p=es.filter(e=>(m[e.id]||'Present')==='Present').length;
-    const pl=es.filter(e=>(m[e.id]||'Present')==='Planned Leave').length;
-    const u=es.filter(e=>(m[e.id]||'Present')==='Unplanned Leave').length;
-    return {total:es.length,present:p,planned:pl,unplanned:u,leave:pl+u,pct:es.length?Math.round(p/es.length*100):0,submitted:!!((window.submittedByShift[sh]||{})[team])};
-  };
-  window.stats=function(team){return window.statsForShift(team,window.activeShift)};
-
-  // TL sees both shift blocks, while edits always belong to the selected shift.
-  window.renderTL=function(){
-    const es=window.teamEmployees(window.currentTeam);
-    document.getElementById('tlTeam').textContent=window.currentTeam;
-    document.getElementById('tlTeam2').textContent=window.currentTeam;
-    document.getElementById('tlMemberCount').textContent=es.length;
-    const active=document.getElementById('tlActiveShift'); if(active) active.textContent=label(window.activeShift);
-    const renderBlock=(sh,icon)=>{
-      const m=window.attendanceByShift[sh]||{};
-      const selected=window.activeShift===sh;
-      const arr=es.filter(e=>true);
-      return `<div class="shift-att-card" style="margin-top:12px;border:2px solid ${selected?'#2563eb':'#e5e7eb'}">\
-        <div class="shift-att-head"><div><span class="shift-dot">${icon}</span><b>${label(sh)}</b></div>\
-        <div class="actions"><span class="badge b-present">${arr.length} Employees</span><button class="btn light" onclick="activateShift('${sh}');renderTL()">${selected?'Editing':'Edit'} ${label(sh)}</button></div></div>\
-        <div class="shift-att-list">${arr.map(e=>`<div class="checkrow"><div><b>${e.name}</b><div class="muted small">${e.id} • ${e.type}</div></div><select class="status-select" ${selected?'':'disabled'} onchange="attendanceByShift['${sh}']['${String(e.id).replace(/'/g,"\\'")}']=this.value">\
-          <option ${(m[e.id]||'Present')==='Present'?'selected':''}>Present</option><option ${(m[e.id]||'Present')==='Planned Leave'?'selected':''}>Planned Leave</option><option ${(m[e.id]||'Present')==='Unplanned Leave'?'selected':''}>Unplanned Leave</option></select></div>`).join('')}</div></div>`;
-    };
-    document.getElementById('memberList').innerHTML=renderBlock(G,'☀️')+renderBlock(S,'🌙');
-  };
-
-  window.reviewAttendance=function(sh){
-    window.activateShift(sh||window.activeShift);
-    const s=window.stats(window.currentTeam), es=window.teamEmployees(window.currentTeam), m=window.attendanceByShift[window.activeShift]||{};
-    const set=(id,v)=>{const e=document.getElementById(id);if(e)e.textContent=v};
-    set('rPresent',s.present);set('rPlanned',s.planned);set('rUnplanned',s.unplanned);set('rLeave',s.leave);set('rPct',s.pct+'%');set('reviewShift',label(window.activeShift));
-    const b=document.getElementById('submitShiftBtn'); if(b){b.textContent='Submit '+label(window.activeShift);b.onclick=()=>window.submitAttendance(window.activeShift)}
-    const rt=document.getElementById('reviewTable'); if(rt) rt.innerHTML=es.map(e=>`<tr><td>${e.name}</td><td>${e.id}</td><td>${e.type}</td><td><span class="badge ${m[e.id]==='Present'?'b-present':m[e.id]==='Planned Leave'?'b-planned':'b-unplanned'}">${m[e.id]||'Present'}</span></td></tr>`).join('');
-    window.showPage('review');
-  };
-
-  window.submitAttendance=async function(sh){
-    if(!window.currentTeam){alert('Team not assigned.');return}
-    sh=norm(sh||window.activeShift); window.activateShift(sh);
-    const team=window.teams.find(t=>t.name===window.currentTeam); if(!team){alert('Team not found.');return}
-    try{
-      const records=window.teamEmployees(window.currentTeam).map(e=>({employee_id:e.id,status:window.apiAttendanceStatus(window.attendanceByShift[sh][e.id]||'Present')}));
-      // Upsert intentionally allows the same shift to be submitted again and updates the existing records.
-      await window.api('saveAttendance',{team_id:team.id,attendance_date:window.today,shift:sh,records,marked_by:window.currentEmployeeId||''});
-      await window.api('submitTeam',{team_id:team.id,attendance_date:window.today,shift:sh,submitted_by:window.currentEmployeeId||''});
-      await window.loadSupabaseSharedData();
-      window.activateShift(sh);
-      const c1=document.getElementById('confirmTeam'); if(c1)c1.textContent=window.currentTeam;
-      const c2=document.getElementById('confirmDate'); if(c2)c2.textContent=window.todayDisplay||window.today;
-      const c3=document.getElementById('confirmShift'); if(c3)c3.textContent=label(sh);
-      window.renderAll();
-      window.showPage('confirmation');
-    }catch(e){alert('Attendance save failed: '+(e?.message||e))}
-  };
-
-  // Direct Shift Submission is intentionally separate from Review & Submit.
-  window.submitShiftDirect=async function(sh){
-    sh=norm(sh);
-    if(!window.currentTeam){alert('Team not assigned.');return}
-    window.activateShift(sh);
-    const s=window.stats(window.currentTeam);
-    if(!confirm(`Submit ${label(sh)} attendance for ${window.currentTeam}?\nPresent: ${s.present}\nPlanned Leave: ${s.planned}\nUnplanned Leave: ${s.unplanned}\n\nYou can submit again later to update the same shift.`)) return;
-    await window.submitAttendance(sh);
-  };
-
-  window.teamCard=function(t){
-    const g=window.statsForShift(t.name,G), s=window.statsForShift(t.name,S);
-    return `<div class="card team-card" onclick="openTeam('${String(t.name).replace(/'/g,"\\'")}')"><div class="team-head"><b>${t.name}</b><span class="badge ${g.submitted||s.submitted?'b-present':'b-pending'}">${g.submitted||s.submitted?'Updated':'Not Submitted'}</span></div><p class="muted small">${t.tlCount} TL + ${t.ftcCount} FTC = ${t.members} Manpower</p><div class="small"><b>General:</b> ${g.submitted?`Present ${g.present} • PL ${g.planned} • UL ${g.unplanned} • ${g.pct}%`:'Pending'}<br><b>2nd:</b> ${s.submitted?`Present ${s.present} • PL ${s.planned} • UL ${s.unplanned} • ${s.pct}%`:'Pending'}</div></div>`;
-  };
-  window.renderTeams=function(){
-    const html=window.teams.map(window.teamCard).join('')||'<div class="empty">No teams found.</div>';
-    const a=document.getElementById('teamGrid');if(a)a.innerHTML=html;
-    const b=document.getElementById('allTeamGrid');if(b)b.innerHTML=html;
-  };
-  window.renderAll=function(){
-    const set=(id,v)=>{const e=document.getElementById(id);if(e)e.textContent=v};
-    set('todayLabel',window.todayDisplay||window.today);set('attendanceDate',window.todayDisplay||window.today);set('leaveDate',window.todayDisplay||window.today);
-    if(window.role==='TL'){window.renderTL();window.renderLeaves()}
-    else if(window.role==='MANAGER'){window.renderManager();window.renderLeaves();window.renderEmployees();window.renderTeams()}
-    else {window.renderManager();window.renderAdmin();window.renderEmployees();window.renderMaster();window.renderTeamMaster();window.renderTLAssignments();window.renderManagers();window.renderTeams()}
-    set('aEmployees',window.employees.length);set('adminTotalTeams',window.teams.length);
-  };
-  window.adminResetShiftAttendance=async function(sh){
-    if(window.role!=='ADMIN'){alert('Admin access required.');return}
-    sh=String(sh||BOTH); const lab=sh===BOTH?'Both shifts':label(sh);
-    if(!confirm(`Reset ${lab} attendance for today (${window.today})?`))return;
-    try{await window.api('resetShift',{employee_id:window.currentEmployeeId||'6300323',shift:sh});await window.loadSupabaseSharedData();window.renderAll();alert(lab+' has been reset for '+(window.todayDisplay||window.today)+'.')}
-    catch(e){alert('Reset failed: '+(e?.message||e))}
-  };
-  window.adminResetTodayAttendance=()=>window.adminResetShiftAttendance(BOTH);
-
-  function start(){
-    if(window.liveRefreshTimer)clearInterval(window.liveRefreshTimer);
-    if(window.role==='TL')return;
-    window.liveRefreshTimer=setInterval(async()=>{if(document.hidden)return;try{await window.loadSupabaseSharedData();window.renderAll()}catch(e){}},3000);
-  }
-  window.startLiveRefresh=start;
-})();
-</script>
-<script>
 /* WORKFORCE FINAL STABILITY OVERRIDE — 04 Oct 2026
    Fixes TL/team loading, shift separation, real-time updates and hard-coded manpower. */
 (function(){
   const G='General Shift', S='2nd Shift', BOTH='BOTH';
   const norm=x=>String(x||G)===S?S:G;
   const esc=v=>String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+
+  /* Preserve TL unsaved leave selections across realtime/background refreshes. */
+  window.__tlDirty=window.__tlDirty||{[G]:{},[S]:{}};
+  const __loadBeforeDirty=window.loadSupabaseSharedData;
+  if(__loadBeforeDirty && !window.__dirtyAttendanceLoadPatch){
+    window.__dirtyAttendanceLoadPatch=true;
+    window.loadSupabaseSharedData=async function(){
+      const dirty=window.__tlDirty||{[G]:{},[S]:{}};
+      const keep={[G]:{...(dirty[G]||{})},[S]:{...(dirty[S]||{})}};
+      await __loadBeforeDirty.apply(this,arguments);
+      window.attendanceByShift=window.attendanceByShift||{[G]:{},[S]:{}};
+      for(const sh of [G,S]) for(const id of Object.keys(keep[sh]||{})) window.attendanceByShift[sh][id]=keep[sh][id];
+      window.attendance=window.attendanceByShift[norm(window.activeShift||G)];
+    };
+  }
 
   async function load(){
     const employeeId=window.currentEmployeeId||'6300323';
@@ -1663,146 +1519,250 @@ window.supabaseConnected = supabaseConnected;
 
 
 <script>
-/* FINAL V18 — reliable Supabase team/employee loader + glass UI */
+/* FINAL V17 — glass UI + robust TL/team data + live refresh safety */
 (function(){
   const G='General Shift', S='2nd Shift';
-  const norm=v=>String(v??'').trim().replace(/\s+/g,' ').toLowerCase();
+  const normName=v=>String(v??'').trim().replace(/\s+/g,' ').toLowerCase();
+  const esc2=v=>String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 
-  /* Glass cards. Do NOT replace the app's original background image. */
+  /* Glass-panel UI: keeps the existing background/image but makes all major cards translucent. */
   const css=document.createElement('style');
-  css.id='final-v18-glass-css';
+  css.id='final-v17-glass-css';
   css.textContent=`
-    .card,.panel,.page-head,.team-card,.metric-card,.shift-att-card,.modal-card,.table-wrap,.notice,.stat-card{
-      background:rgba(255,255,255,.58)!important;
-      border:1px solid rgba(255,255,255,.78)!important;
-      box-shadow:0 10px 35px rgba(20,45,80,.12)!important;
-      backdrop-filter:blur(18px) saturate(135%);
-      -webkit-backdrop-filter:blur(18px) saturate(135%);
-    }
+    .app{background-image:linear-gradient(rgba(240,246,255,.70),rgba(240,246,255,.70)),var(--app-bg-image,none)!important;background-attachment:fixed;background-size:cover}
+    .card,.panel,.page-head,.team-card,.metric-card,.shift-att-card,.modal-card,.topbar,.sidebar,.table-wrap,.notice,.stat-card{background:rgba(255,255,255,.62)!important;border:1px solid rgba(255,255,255,.72)!important;box-shadow:0 10px 35px rgba(20,45,80,.10)!important;backdrop-filter:blur(16px) saturate(130%);-webkit-backdrop-filter:blur(16px) saturate(130%)}
     .input,.status-select{background:rgba(255,255,255,.76)!important;border-color:rgba(180,195,215,.65)!important}
-    .table th,.table td{background:rgba(255,255,255,.20)}
+    .table th,.table td{background:rgba(255,255,255,.18)}
     .shift-att-card{overflow:hidden}
+    @media(max-width:700px){.card,.panel,.page-head{backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}}
   `;
   document.head.appendChild(css);
 
-  /* Replace the older chain of loaders with one deterministic loader.
-     The database is the source of truth: teams -> team_members -> employees data. */
-  window.loadSupabaseSharedData=async function(){
-    const employeeId=String(window.currentEmployeeId||'').trim();
-    if(!employeeId) throw new Error('Employee ID is missing. Please login again.');
-
-    const tr=await window.api('getTeams',{employee_id:employeeId});
-    const allTeams=Array.isArray(tr?.teams)?tr.teams:[];
-    if(!allTeams.length) throw new Error('No active teams found in Supabase.');
-
-    let visibleTeams=allTeams;
-    if(String(window.role||'').toUpperCase()==='TL'){
-      const wanted=norm(window.currentTeam);
-      visibleTeams=allTeams.filter(t=>norm(t.team_name)===wanted);
-      if(!visibleTeams.length) throw new Error('Your assigned team was not found in Supabase.');
-      window.currentTeam=visibleTeams[0].team_name;
-      try{currentTeam=visibleTeams[0].team_name}catch(_){ }
-    }
-
-    const planMap={};
-    try{
-      const pr=await window.api('getShiftPlans',{employee_id:employeeId,date:window.today});
-      (pr?.plans||[]).forEach(x=>{planMap[String(x.employee_id)]=String(x.shift)==='2nd Shift'?S:G;});
-      (pr?.ranges||[]).filter(x=>String(x.start_date)<=String(window.today)&&String(x.end_date)>=String(window.today))
-        .forEach(x=>{planMap[String(x.employee_id)]=String(x.shift)==='2nd Shift'?S:G;});
-    }catch(_){ }
-
-    const attendanceByShift={[G]:{},[S]:{}};
-    const submittedByShift={[G]:{},[S]:{}};
-    const employeeMap=new Map();
-
-    for(const t of visibleTeams){
-      const [gr,sr]=await Promise.all([
-        window.api('getTeamEmployees',{employee_id:employeeId,team_id:t.id,date:window.today,shift:G}),
-        window.api('getTeamEmployees',{employee_id:employeeId,team_id:t.id,date:window.today,shift:S})
-      ]);
-
-      const members=(gr?.employees?.length?gr.employees:(sr?.employees||[]));
-      for(const m of members){
-        const id=String(m?.employee_id||'').trim();
-        if(!id) continue;
-        if(!employeeMap.has(id)) employeeMap.set(id,{
-          id,
-          name:m.name||id,
-          team:t.team_name,
-          type:String(m.role||'').toUpperCase()==='TL'?'TL':'FTC',
-          role:m.role||'',
-          active:m.active!==false,
-          shift:planMap[id]||G
-        });
+  /* Make TL login independent of capitalization/extra spaces in team names.
+     If the normal loader misses the team, reload that single team by its ID. */
+  const oldLoad=window.loadSupabaseSharedData;
+  if(oldLoad && !window.__v17WrappedLoad){
+    window.__v17WrappedLoad=true;
+    window.loadSupabaseSharedData=async function(){
+      await oldLoad.apply(this,arguments);
+      if(String(window.role||'').toUpperCase()!=='TL' || !window.currentTeam)return;
+      const wanted=normName(window.currentTeam);
+      let team=(window.teams||[]).find(t=>normName(t.name)===wanted);
+      if(!team){
+        const tr=await window.api('getTeams',{employee_id:window.currentEmployeeId});
+        const all=tr?.teams||[];
+        team=all.find(t=>normName(t.team_name)===wanted);
+        if(team){
+          window.currentTeam=team.team_name;
+          if(typeof currentTeam!=='undefined')currentTeam=team.team_name;
+          const r=await window.api('getTeamEmployees',{employee_id:window.currentEmployeeId,team_id:team.id,date:window.today,shift:G});
+          const em=(r?.employees||[]).filter(e=>e.active!==false).map(e=>({id:e.employee_id,name:e.name||e.employee_id,team:team.team_name,type:String(e.role||'').toUpperCase()==='TL'?'TL':'FTC',role:e.role,active:e.active!==false}));
+          window.employees=em;
+          window.teams=[{id:team.id,name:team.team_name,members:em.length,tlCount:em.filter(e=>e.type==='TL').length,ftcCount:em.filter(e=>e.type==='FTC').length,active:team.active!==false}];
+          window.attendanceByShift=window.attendanceByShift||{[G]:{},[S]:{}};
+          window.submittedByShift=window.submittedByShift||{[G]:{},[S]:{}};
+          const ar=r?.attendance||[]; for(const a of ar){window.attendanceByShift[G][a.employee_id]=window.normalizeAttendanceStatus?window.normalizeAttendanceStatus(a.status):a.status;}
+          if(ar.length)window.submittedByShift[G][team.team_name]=true;
+        }
       }
-      for(const a of (gr?.attendance||[])) attendanceByShift[G][String(a.employee_id)]=window.normalizeAttendanceStatus?window.normalizeAttendanceStatus(a.status):a.status;
-      for(const a of (sr?.attendance||[])) attendanceByShift[S][String(a.employee_id)]=window.normalizeAttendanceStatus?window.normalizeAttendanceStatus(a.status):a.status;
-      if((gr?.attendance||[]).length) submittedByShift[G][t.team_name]=true;
-      if((sr?.attendance||[]).length) submittedByShift[S][t.team_name]=true;
-    }
+      if(!team)throw new Error('Your assigned team was not found. Please contact Admin.');
+      if(typeof window.syncTeamCounts==='function')window.syncTeamCounts();
+    };
+  }
 
-    const emps=Array.from(employeeMap.values());
-    /* Default unmarked attendance to Present, but keep actual submitted records. */
-    for(const e of emps){
-      if(attendanceByShift[G][e.id]==null) attendanceByShift[G][e.id]='Present';
-      if(attendanceByShift[S][e.id]==null) attendanceByShift[S][e.id]='Present';
-    }
-
-    window.employees=emps;
-    window.teams=visibleTeams.map(t=>({
-      id:t.id,name:t.team_name,members:emps.filter(e=>norm(e.team)===norm(t.team_name)).length,
-      tlCount:emps.filter(e=>norm(e.team)===norm(t.team_name)&&e.type==='TL').length,
-      ftcCount:emps.filter(e=>norm(e.team)===norm(t.team_name)&&e.type!=='TL').length,
-      active:t.active!==false
-    }));
-    window.attendanceByShift=attendanceByShift;
-    window.submittedByShift=submittedByShift;
-    window.activeShift=String(window.activeShift||G)==='2nd Shift'?S:G;
-    window.attendance=attendanceByShift[window.activeShift];
-    window.submittedTeams=submittedByShift[window.activeShift];
-    window.supabaseConnected=true;
-
-    /* Keep the old globals/functions in sync for all legacy screens. */
-    try{employees=window.employees;teams=window.teams;attendance=window.attendance;submittedTeams=window.submittedTeams;}catch(_){ }
-    if(typeof window.syncTeamCounts==='function') window.syncTeamCounts();
-  };
-
-  window.activateShift=function(sh){
-    sh=String(sh)==='2nd Shift'?S:G;
-    window.activeShift=sh;
-    window.attendance=window.attendanceByShift?.[sh]||{};
-    window.submittedTeams=window.submittedByShift?.[sh]||{};
-    try{attendance=window.attendance;submittedTeams=window.submittedTeams}catch(_){ }
-  };
-
-  /* Team counters always come from the current Supabase employee list. */
+  /* Team counters use the live Supabase employee list and are always de-duplicated by Employee ID. */
   window.syncTeamCounts=function(){
-    const ts=window.teams||[], es=window.employees||[];
+    const ts=window.teams||[];
+    const es=window.employees||[];
     ts.forEach(t=>{
-      const seen=new Set(), members=[];
-      for(const e of es){
-        if(norm(e.team)!==norm(t.name)) continue;
-        const id=String(e.id||'');
-        if(!id||seen.has(id)) continue;
-        seen.add(id);members.push(e);
-      }
-      t.tlCount=members.filter(e=>e.type==='TL').length;
-      t.ftcCount=members.filter(e=>e.type!=='TL').length;
+      const seen=new Set();
+      const members=es.filter(e=>normName(e.team)===normName(t.name)).filter(e=>{const id=String(e.id||e.employee_id||'');if(!id||seen.has(id))return false;seen.add(id);return true;});
+      t.tlCount=members.filter(e=>String(e.type||e.role||'').toUpperCase()==='TL').length;
+      t.ftcCount=members.filter(e=>String(e.type||e.role||'').toUpperCase()!=='TL').length;
       t.members=members.length;
     });
   };
 
-  /* Refresh only while logged in. */
+  /* Live refresh: only refresh data when a logged-in user is present, never the login screen. */
   let timer=null;
   window.startLiveRefresh=function(){
     clearInterval(timer);
     timer=setInterval(async()=>{
-      if(!window.currentEmployeeId||!window.role||document.hidden)return;
+      if(!window.currentEmployeeId || !window.role)return;
       try{await window.loadSupabaseSharedData();window.renderAll?.();}catch(e){console.warn('Live refresh failed',e);}
     },30000);
   };
   window.addEventListener('beforeunload',()=>clearInterval(timer));
+
+  /* Re-render glass styling after dynamic modal/page creation. */
+  window.addEventListener('load',()=>{setTimeout(()=>window.renderAll?.(),150);});
+})();
+</script>
+
+<script>
+/* FINAL CLEAN TL ATTENDANCE PATCH — single shift flow, persistent PL/UL, accurate review */
+(function(){
+  const G='General Shift', S='2nd Shift';
+  const norm=x=>String(x||G)===S?S:G;
+  const esc=v=>String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+  const getMembers=sh=>(window.employees||[]).filter(e=>e.team===window.currentTeam && norm(e.shift)===sh);
+  const ensureMaps=()=>{
+    window.attendanceByShift=window.attendanceByShift||{[G]:{},[S]:{}};
+    window.attendanceByShift[G]=window.attendanceByShift[G]||{};
+    window.attendanceByShift[S]=window.attendanceByShift[S]||{};
+    window.submittedByShift=window.submittedByShift||{[G]:{},[S]:{}};
+  };
+  const markDirty=(sh,id,val)=>{
+    window.__tlDirty=window.__tlDirty||{[G]:{},[S]:{}};
+    window.__tlDirty[sh]=window.__tlDirty[sh]||{};
+    window.__tlDirty[sh][String(id)]=val;
+  };
+
+  window.renderTL=function(){
+    ensureMaps();
+    const sh=norm(window.activeShift||G), team=window.currentTeam||'';
+    window.activeShift=sh;
+    window.attendance=window.attendanceByShift[sh];
+    const arr=getMembers(sh), m=window.attendanceByShift[sh];
+    const st=window.statsForShift(team,sh);
+    const set=(id,v)=>{const el=document.getElementById(id);if(el)el.textContent=v};
+    set('tlTeam',team); set('tlTeam2',team); set('tlMemberCount',arr.length); set('tlActiveShift',sh);
+    const top=document.querySelector('#attendance .team-head .actions');
+    if(top) top.innerHTML='<button class="btn primary" id="activeReviewBtn">Review &amp; Submit • '+esc(sh)+'</button>';
+    document.getElementById('activeReviewBtn')?.addEventListener('click',()=>window.reviewAttendance(sh));
+    const rows=arr.map(e=>{
+      const id=String(e.id), val=m[id]||'Present';
+      return '<div class="checkrow"><div><b>'+esc(e.name)+'</b><div class="muted small">'+esc(id)+' • '+esc(e.type)+'</div></div><select class="status-select" data-att-id="'+esc(id)+'"><option value="Present" '+(val==='Present'?'selected':'')+'>Present</option><option value="Planned Leave" '+(val==='Planned Leave'?'selected':'')+'>Planned Leave</option><option value="Unplanned Leave" '+(val==='Unplanned Leave'?'selected':'')+'>Unplanned Leave</option></select></div>';
+    }).join('');
+    const ml=document.getElementById('memberList'); if(!ml)return;
+    ml.innerHTML='<div class="shift-switch" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px"><button class="btn '+(sh===G?'primary':'light')+'" id="switchGeneral">☀️ General Shift</button><button class="btn '+(sh===S?'primary':'light')+'" id="switchSecond">🌙 2nd Shift</button></div><div class="small muted" style="padding:8px 0">'+arr.length+' Employees • Present '+st.present+' • PL '+st.planned+' • UL '+st.unplanned+' • '+st.pct+'%</div>'+(rows||'<div class="empty">No employees assigned to this shift.</div>')+'<div class="actions" style="justify-content:flex-end;margin-top:14px"><button class="btn primary" id="bottomReviewBtn">Review &amp; Submit • '+esc(sh)+'</button></div>';
+    document.getElementById('switchGeneral')?.addEventListener('click',()=>{window.activateShift(G);window.renderTL()});
+    document.getElementById('switchSecond')?.addEventListener('click',()=>{window.activateShift(S);window.renderTL()});
+    document.getElementById('bottomReviewBtn')?.addEventListener('click',()=>window.reviewAttendance(sh));
+    ml.querySelectorAll('select[data-att-id]').forEach(sel=>sel.addEventListener('change',e=>{
+      const id=String(e.target.getAttribute('data-att-id'));
+      window.attendanceByShift[sh][id]=e.target.value;
+      markDirty(sh,id,e.target.value);
+      // Re-render only the counters/list; do not call loadSupabaseSharedData here.
+      window.renderTL();
+    }));
+  };
+
+  window.reviewAttendance=function(sh){
+    ensureMaps(); sh=norm(sh||window.activeShift); window.activateShift(sh);
+    const m=window.attendanceByShift[sh]||{}, arr=getMembers(sh), st=window.statsForShift(window.currentTeam,sh);
+    const set=(id,v)=>{const el=document.getElementById(id);if(el)el.textContent=v};
+    set('rPresent',st.present);set('rPlanned',st.planned);set('rUnplanned',st.unplanned);set('rLeave',st.leave);set('rPct',st.pct+'%');set('reviewShift',sh);
+    const rt=document.getElementById('reviewTable');
+    if(rt)rt.innerHTML=arr.map(e=>'<tr><td>'+esc(e.name)+'</td><td>'+esc(e.id)+'</td><td>'+esc(e.type)+'</td><td>'+esc(m[String(e.id)]||'Present')+'</td></tr>').join('');
+    const b=document.getElementById('submitShiftBtn');
+    if(b){b.textContent='Submit '+sh;b.onclick=()=>window.submitAttendance(sh)}
+    window.showPage?.('review');
+  };
+
+  window.submitAttendance=async function(sh){
+    ensureMaps(); sh=norm(sh||window.activeShift); window.activateShift(sh);
+    const team=(window.teams||[]).find(t=>t.name===window.currentTeam), arr=getMembers(sh), m=window.attendanceByShift[sh]||{};
+    if(!team){alert('Team not found.');return} if(!arr.length){alert('No employees are assigned to '+sh+' for this team.');return}
+    const st=window.statsForShift(window.currentTeam,sh);
+    if(!confirm('Submit '+sh+' attendance for '+window.currentTeam+'?\nPresent: '+st.present+'\nPlanned Leave: '+st.planned+'\nUnplanned Leave: '+st.unplanned))return;
+    const b=document.getElementById('submitShiftBtn'); if(b){b.disabled=true;b.textContent='Submitting…'}
+    try{
+      const records=arr.map(e=>({employee_id:e.id,status:window.apiAttendanceStatus(m[String(e.id)]||'Present')}));
+      await window.api('saveAttendance',{team_id:team.id,attendance_date:window.today,shift:sh,records,marked_by:window.currentEmployeeId||''});
+      await window.api('submitTeam',{team_id:team.id,attendance_date:window.today,shift:sh,submitted_by:window.currentEmployeeId||''});
+      if(window.__tlDirty?.[sh])window.__tlDirty[sh]={};
+      window.submittedByShift[sh]=window.submittedByShift[sh]||{};window.submittedByShift[sh][window.currentTeam]=true;
+      const c1=document.getElementById('confirmTeam');if(c1)c1.textContent=window.currentTeam;
+      const c2=document.getElementById('confirmDate');if(c2)c2.textContent=window.todayDisplay||window.today;
+      const c3=document.getElementById('confirmShift');if(c3)c3.textContent=sh;
+      window.showPage?.('confirmation');
+      // Refresh in the background after the successful save; never during selection.
+      window.loadSupabaseSharedData?.().then(()=>{window.activateShift(sh);window.renderAll?.()}).catch(e=>console.warn('Post-submit refresh failed',e));
+    }catch(e){alert('Attendance save failed: '+(e?.message||e));}
+    finally{if(b){b.disabled=false;b.textContent='Submit '+sh}}
+  };
+  window.submitShiftDirect=window.submitAttendance;
+  window.addEventListener('load',()=>setTimeout(()=>{if(window.role==='TL')window.renderTL?.()},250));
+})();
+</script>
+
+<script>
+/* FINAL OVERRIDE — TL-safe attendance state, single submit flow, no refresh overwrite */
+(function(){
+  const G='General Shift', S='2nd Shift';
+  const norm=x=>String(x||G)===S?S:G;
+  const esc=v=>String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+  const ensure=()=>{
+    window.attendanceByShift=window.attendanceByShift||{[G]:{},[S]:{}};
+    window.attendanceByShift[G]=window.attendanceByShift[G]||{};
+    window.attendanceByShift[S]=window.attendanceByShift[S]||{};
+    window.submittedByShift=window.submittedByShift||{[G]:{},[S]:{}};
+    window.__tlDirty=window.__tlDirty||{[G]:{},[S]:{}};
+  };
+  const members=sh=>(window.employees||[]).filter(e=>e.team===window.currentTeam&&norm(e.shift)===sh);
+  const stats=sh=>{const a=members(sh),m=window.attendanceByShift[sh]||{};let p=0,pl=0,u=0;for(const e of a){const v=m[String(e.id)]||'Present';if(v==='Planned Leave')pl++;else if(v==='Unplanned Leave')u++;else p++;}return {total:a.length,present:p,planned:pl,unplanned:u,leave:pl+u,pct:a.length?Math.round(p/a.length*100):0};};
+  window.activateShift=function(sh){ensure();window.activeShift=norm(sh);window.attendance=window.attendanceByShift[window.activeShift];window.submittedTeams=window.submittedByShift[window.activeShift]||{};};
+  window.statsForShift=function(team,sh){ensure();sh=norm(sh);const old=window.currentTeam;window.currentTeam=team;const r=stats(sh);window.currentTeam=old;return {...r,submitted:!!window.submittedByShift[sh]?.[team]};};
+  window.renderTL=function(){
+    ensure(); const sh=norm(window.activeShift||G); window.activateShift(sh); const arr=members(sh),m=window.attendanceByShift[sh];
+    const ml=document.getElementById('memberList'); if(!ml)return;
+    const st=stats(sh);
+    const rows=arr.map(e=>{const id=String(e.id),v=m[id]||'Present';return `<div class="checkrow"><div><b>${esc(e.name)}</b><div class="muted small">${esc(id)} • ${esc(e.type||e.role||'')}</div></div><select class="status-select" data-att-id="${esc(id)}"><option value="Present" ${v==='Present'?'selected':''}>Present</option><option value="Planned Leave" ${v==='Planned Leave'?'selected':''}>Planned Leave</option><option value="Unplanned Leave" ${v==='Unplanned Leave'?'selected':''}>Unplanned Leave</option></select></div>`}).join('');
+    ml.innerHTML=`<div class="shift-switch" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px"><button class="btn ${sh===G?'primary':'light'}" id="switchGeneral">☀️ General Shift</button><button class="btn ${sh===S?'primary':'light'}" id="switchSecond">🌙 2nd Shift</button></div><div class="small muted" style="padding:8px 0">${arr.length} Employees • Present ${st.present} • PL ${st.planned} • UL ${st.unplanned} • ${st.pct}%</div>${rows||'<div class="empty">No employees assigned to this shift.</div>'}<div class="actions" style="justify-content:flex-end;margin-top:14px"><button class="btn primary" id="bottomReviewBtn">Review &amp; Submit • ${esc(sh)}</button></div>`;
+    document.getElementById('switchGeneral')?.addEventListener('click',()=>{window.activateShift(G);window.renderTL();});
+    document.getElementById('switchSecond')?.addEventListener('click',()=>{window.activateShift(S);window.renderTL();});
+    document.getElementById('bottomReviewBtn')?.addEventListener('click',()=>window.reviewAttendance(sh));
+    ml.querySelectorAll('select[data-att-id]').forEach(sel=>sel.addEventListener('change',e=>{const id=String(e.target.dataset.attId);window.attendanceByShift[sh][id]=e.target.value;window.__tlDirty[sh][id]=e.target.value;window.renderTL();}));
+  };
+  window.reviewAttendance=function(sh){ensure();sh=norm(sh||window.activeShift);window.activateShift(sh);const st=stats(sh),m=window.attendanceByShift[sh],arr=members(sh);for(const [id,v] of [['rPresent',st.present],['rPlanned',st.planned],['rUnplanned',st.unplanned],['rLeave',st.leave],['rPct',st.pct+'%'],['reviewShift',sh]]){const el=document.getElementById(id);if(el)el.textContent=v;}const rt=document.getElementById('reviewTable');if(rt)rt.innerHTML=arr.map(e=>`<tr><td>${esc(e.name)}</td><td>${esc(e.id)}</td><td>${esc(e.type||e.role||'')}</td><td>${esc(m[String(e.id)]||'Present')}</td></tr>`).join('');const b=document.getElementById('submitShiftBtn');if(b){b.textContent='Submit '+sh;b.onclick=()=>window.submitAttendance(sh);}window.showPage?.('review');};
+  window.submitAttendance=async function(sh){ensure();sh=norm(sh||window.activeShift);window.activateShift(sh);const team=(window.teams||[]).find(t=>t.name===window.currentTeam),arr=members(sh),m=window.attendanceByShift[sh]||{};if(!team)return alert('Team not found.');if(!arr.length)return alert('No employees are assigned to '+sh+' for this team.');const st=stats(sh);if(!confirm(`Submit ${sh} attendance for ${window.currentTeam}?\nPresent: ${st.present}\nPlanned Leave: ${st.planned}\nUnplanned Leave: ${st.unplanned}`))return;try{const records=arr.map(e=>({employee_id:e.id,status:window.apiAttendanceStatus(m[String(e.id)]||'Present')}));await window.api('saveAttendance',{team_id:team.id,attendance_date:window.today,shift:sh,records,marked_by:window.currentEmployeeId||''});await window.api('submitTeam',{team_id:team.id,attendance_date:window.today,shift:sh,submitted_by:window.currentEmployeeId||''});window.__tlDirty[sh]={};window.submittedByShift[sh][window.currentTeam]=true;document.getElementById('confirmTeam')&&(document.getElementById('confirmTeam').textContent=window.currentTeam);document.getElementById('confirmDate')&&(document.getElementById('confirmDate').textContent=window.todayDisplay||window.today);document.getElementById('confirmShift')&&(document.getElementById('confirmShift').textContent=sh);window.showPage?.('confirmation');}catch(e){alert('Attendance save failed: '+(e?.message||e));}};
+  window.submitShiftDirect=window.submitAttendance;
+  const oldRefresh=window.startLiveRefresh;
+  window.startLiveRefresh=function(){if(window.role==='TL'){return;}if(oldRefresh)oldRefresh();};
+  window.addEventListener('load',()=>setTimeout(()=>{if(window.role==='TL')window.renderTL();},300));
+})();
+</script>
+
+<script>
+/* FINAL ATTENDANCE PERSISTENCE GUARD — 06 Oct 2026
+   Keeps TL's PL/UL selections across any background reload and prevents
+   stale reloads from replacing the current shift before submit. */
+(function(){
+  const G='General Shift', S='2nd Shift';
+  const norm=x=>String(x||G)===S?S:G;
+  const ensure=()=>{
+    window.attendanceByShift=window.attendanceByShift||{[G]:{},[S]:{}};
+    window.attendanceByShift[G]=window.attendanceByShift[G]||{};
+    window.attendanceByShift[S]=window.attendanceByShift[S]||{};
+    window.__tlDirty=window.__tlDirty||{[G]:{},[S]:{}};
+  };
+  if(!window.__finalAttendanceGuard){
+    window.__finalAttendanceGuard=true;
+    const baseLoad=window.loadSupabaseSharedData;
+    if(baseLoad){
+      window.loadSupabaseSharedData=async function(){
+        ensure();
+        const keep={G:{},S:{}};
+        for(const sh of [G,S]) for(const [id,val] of Object.entries(window.__tlDirty[sh]||{})) keep[sh][String(id)]=val;
+        const result=await baseLoad.apply(this,arguments);
+        ensure();
+        for(const sh of [G,S]) for(const [id,val] of Object.entries(keep[sh])) window.attendanceByShift[sh][id]=val;
+        window.activeShift=norm(window.activeShift||G);
+        window.attendance=window.attendanceByShift[window.activeShift];
+        return result;
+      };
+    }
+  }
+
+  const oldRender=window.renderTL;
+  window.renderTL=function(){
+    ensure();
+    const sh=norm(window.activeShift||G);
+    window.activeShift=sh;
+    window.attendance=window.attendanceByShift[sh];
+    if(oldRender) oldRender.apply(this,arguments);
+  };
 })();
 </script>
 </html>
